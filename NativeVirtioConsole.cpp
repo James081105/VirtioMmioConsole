@@ -36,6 +36,14 @@ class NativeVirtioConsole : public IOService {
     friend class NativeVirtioConsoleClient;
     friend IOReturn native_console_send(IOService *,IOService *,const void *,size_t);
     friend IOReturn native_console_receive(IOService *,IOService *,void *,size_t *);
+    // native_console_report() is a free function like the two above and calls
+    // the same protected send(), so it needs the same grant.  Without this line
+    // it does not compile: "'send' is a protected member of
+    // 'NativeVirtioConsole'".  Measured on run 41313323081, which failed
+    // archive 6/11 on exactly that error -- and every source-level guard this
+    // repository has passed, because they read the function's shape and not the
+    // class's access control.
+    friend IOReturn native_console_report(const void *,size_t);
     IOMemoryMap *mapping=nullptr;
     IOLock *gate=nullptr;
     IOService *owner=nullptr;
