@@ -275,11 +275,9 @@ bool NativeVirtioConsole::start(IOService *provider) {
     bool vectors=(vbar!=0);                   // VBAR_EL1: 0 is the reset value
     bool irqs=((daif>>7)&1)==0;               // DAIF.I: clear means unmasked
     bool timer=(cntfrq!=0);                   // CNTFRQ_EL0: the clock's frequency
-    #define NATIVE_CONSOLE_PICK(on,off,flag) ((flag)?(on):(off))
     #else
     uint64_t vbar=0,daif=0,cntfrq=0;
     bool mmu_on=false,vectors=false,irqs=false,timer=false;
-    #define NATIVE_CONSOLE_PICK(on,off,flag) (off)
     #endif
     #define NATIVE_CONSOLE_SRC "\"source\":\"NativeVirtioConsole.start\"}"
     static char const pt_on[] ="{\"event\":\"xnu.page_tables\",\"mmu_enabled\":true," NATIVE_CONSOLE_SRC "\n";
@@ -297,13 +295,37 @@ bool NativeVirtioConsole::start(IOService *provider) {
     static char const ir_ft[]=NATIVE_CONSOLE_IRQ("false","true");
     static char const ir_ff[]=NATIVE_CONSOLE_IRQ("false","false");
     #undef NATIVE_CONSOLE_IRQ
+    // The selection happens HERE, in an if, and every arm of it names an ARRAY.
+    //
+    // MEASURED 2026-11-01 on a real guest, and it is why this is shaped this
+    // way.  The previous version passed a ternary straight to the emit macro:
+    //
+    //     NATIVE_CONSOLE_EMIT(NATIVE_CONSOLE_PICK(pt_on,pt_off,mmu_on));
+    //     #define NATIVE_CONSOLE_PICK(on,off,flag) ((flag)?(on):(off))
+    //
+    // The two arms are arrays of DIFFERENT lengths -- "true" is four
+    // characters and "false" is five -- so the conditional operator decays
+    // both to `char const *`.  The macro's `sizeof(arr)` is then the size of a
+    // POINTER, 8 on AArch64, and `sizeof(arr)-1` is 7.  All three XNU records
+    // were therefore sent seven bytes long: the capture ended with the literal
+    // bytes b'{"event{"event{"event'.
+    //
+    // Nothing upstream caught it.  The literals are in the kernel -- a
+    // byte-level grep finds all five records, and the two IOKit records sent
+    // by name arrived complete -- so the build was green, the kernel check was
+    // green, and only the wire showed the truncation.  Selecting outside the
+    // emit keeps sizeof looking at an array, which is the only thing that
+    // makes `sizeof(arr)-1` the record's own length.
     #define NATIVE_CONSOLE_EMIT(arr) send(arr,sizeof(arr)-1)
-    NATIVE_CONSOLE_EMIT(NATIVE_CONSOLE_PICK(pt_on,pt_off,mmu_on));
-    NATIVE_CONSOLE_EMIT(NATIVE_CONSOLE_PICK(ev_on,ev_off,vectors));
-    NATIVE_CONSOLE_EMIT(irqs ? (timer ? ir_tt : ir_tf) : (timer ? ir_ft : ir_ff));
+    if (mmu_on) { NATIVE_CONSOLE_EMIT(pt_on); } else { NATIVE_CONSOLE_EMIT(pt_off); }
+    if (vectors) { NATIVE_CONSOLE_EMIT(ev_on); } else { NATIVE_CONSOLE_EMIT(ev_off); }
+    if (irqs) {
+        if (timer) { NATIVE_CONSOLE_EMIT(ir_tt); } else { NATIVE_CONSOLE_EMIT(ir_tf); }
+    } else {
+        if (timer) { NATIVE_CONSOLE_EMIT(ir_ft); } else { NATIVE_CONSOLE_EMIT(ir_ff); }
+    }
     #undef NATIVE_CONSOLE_EMIT
     #undef NATIVE_CONSOLE_SRC
-    #undef NATIVE_CONSOLE_PICK
     registerService();return true;
 }
 void NativeVirtioConsole::cleanup() {
