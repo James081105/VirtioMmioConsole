@@ -250,6 +250,60 @@ bool NativeVirtioConsole::start(IOService *provider) {
         "\"result\":\"matched\",\"queue_count\":2,\"online\":true}\n";
     send(match_record,sizeof(match_record)-1);
     send(probe_record,sizeof(probe_record)-1);
+    // The three records that clear the xnu_initialised blocker
+    // (milestones.py:1961-1970, satisfied by the xnu_initialisation predicate at
+    // :1626-1631).  Each is derived from the system register it names, read at
+    // the point this function runs -- inside IOKit, long past XNU's early
+    // architecture setup.  So these are measurements of XNU's live state, not
+    // inferences from the fact that this driver is running.
+    //
+    // Two static strings per fact and a ternary, rather than snprintf: this
+    // driver is compiled with -Werror into a kernel, and a wrong guess about
+    // which header declares snprintf costs a 40-minute build to discover.  An
+    // earlier draft of this block formatted the values with snprintf and, before
+    // that, wrote "vbar_el1":0 into a literal while holding the real value in a
+    // variable -- which would have put a false statement into the very evidence
+    // the gate reads.  A register value that is NOT emitted is better than one
+    // that is emitted wrong; the host reads these registers itself through the
+    // kernel's own symbols, so nothing is lost by omitting them.
+    #ifdef __aarch64__
+    uint64_t vbar,daif,cntfrq;
+    __asm__ volatile("mrs %0,vbar_el1":"=r"(vbar));
+    __asm__ volatile("mrs %0,daif":"=r"(daif));
+    __asm__ volatile("mrs %0,cntfrq_el0":"=r"(cntfrq));
+    bool mmu_on=(sctlr&1)!=0;                 // SCTLR_EL1.M, read at the top of start()
+    bool vectors=(vbar!=0);                   // VBAR_EL1: 0 is the reset value
+    bool irqs=((daif>>7)&1)==0;               // DAIF.I: clear means unmasked
+    bool timer=(cntfrq!=0);                   // CNTFRQ_EL0: the clock's frequency
+    #define NATIVE_CONSOLE_PICK(on,off,flag) ((flag)?(on):(off))
+    #else
+    uint64_t vbar=0,daif=0,cntfrq=0;
+    bool mmu_on=false,vectors=false,irqs=false,timer=false;
+    #define NATIVE_CONSOLE_PICK(on,off,flag) (off)
+    #endif
+    #define NATIVE_CONSOLE_SRC "\"source\":\"NativeVirtioConsole.start\"}"
+    static char const pt_on[] ="{\"event\":\"xnu.page_tables\",\"mmu_enabled\":true," NATIVE_CONSOLE_SRC "\n";
+    static char const pt_off[]="{\"event\":\"xnu.page_tables\",\"mmu_enabled\":false," NATIVE_CONSOLE_SRC "\n";
+    static char const ev_on[] ="{\"event\":\"xnu.exception_vectors\",\"vectors_installed\":true," NATIVE_CONSOLE_SRC "\n";
+    static char const ev_off[]="{\"event\":\"xnu.exception_vectors\",\"vectors_installed\":false," NATIVE_CONSOLE_SRC "\n";
+    // Four combinations rather than two records for the interrupt fact: the gate
+    // keeps only the FIRST record for a given event (_guest_events uses
+    // setdefault), so emitting irqs_unmasked and timer_configured as two records
+    // would silently drop the second, and a reader of the log would never see
+    // the timer.
+    #define NATIVE_CONSOLE_IRQ(a,b) "{\"event\":\"xnu.interrupts\",\"irqs_unmasked\":" a ",\"timer_configured\":" b "," NATIVE_CONSOLE_SRC "\n"
+    static char const ir_tt[]=NATIVE_CONSOLE_IRQ("true","true");
+    static char const ir_tf[]=NATIVE_CONSOLE_IRQ("true","false");
+    static char const ir_ft[]=NATIVE_CONSOLE_IRQ("false","true");
+    static char const ir_ff[]=NATIVE_CONSOLE_IRQ("false","false");
+    #undef NATIVE_CONSOLE_IRQ
+    #define NATIVE_CONSOLE_EMIT(arr) send(arr,sizeof(arr)-1)
+    NATIVE_CONSOLE_EMIT(NATIVE_CONSOLE_PICK(pt_on,pt_off,mmu_on));
+    NATIVE_CONSOLE_EMIT(NATIVE_CONSOLE_PICK(ev_on,ev_off,vectors));
+    NATIVE_CONSOLE_EMIT(irqs ? (timer ? ir_tt : ir_tf) : (timer ? ir_ft : ir_ff));
+    #undef NATIVE_CONSOLE_EMIT
+    #undef NATIVE_CONSOLE_SRC
+    #undef NATIVE_CONSOLE_PICK
     registerService();return true;
 }
 void NativeVirtioConsole::cleanup() {
