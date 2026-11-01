@@ -82,6 +82,25 @@ public:
 OSDefineMetaClassAndStructors(NativeVirtioConsole,IOService)
 OSDefineMetaClassAndStructors(NativeVirtioConsoleClient,IOUserClient)
 
+//: The one live console, or null while there is none.  Set by start() once the
+//: port is genuinely writable and cleared by cleanup() once the device is
+//: released, so a caller can never report through a port that is gone.
+//:
+//: WHY THIS EXISTS.  The mount this board needs happens in init's context --
+//: MEASURED 2026-11-01, the kernel ring reads "disk4s1 mounting volume
+//: ...SystemCryptex, requested by: init (pid 1)" -- and that is long AFTER
+//: IOKit matching.  start() therefore cannot report it: at start() time there
+//: is no mount to report.  native_console_send() cannot report it either,
+//: because it refuses while isOpen(owner) is false and nothing on this board
+//: ever opens the port.
+//:
+//: So this is the same send() the driver's own records use, made reachable from
+//: kernel code that runs later.  It reports only what its caller measured: a
+//: record emitted through here is exactly as true as the caller's state, which
+//: is why the caller is the code that performs the mount and not a guess about
+//: it.
+static NativeVirtioConsole *g_console=nullptr;
+
 extern "C" IOReturn native_console_send(IOService *provider,IOService *owner,const void *bytes,size_t size) {
     NativeVirtioConsole *console=OSDynamicCast(NativeVirtioConsole,provider);
     return console && owner && console->isOpen(owner)?console->send(bytes,size):kIOReturnNotOpen;
@@ -89,6 +108,15 @@ extern "C" IOReturn native_console_send(IOService *provider,IOService *owner,con
 extern "C" IOReturn native_console_receive(IOService *provider,IOService *owner,void *bytes,size_t *size) {
     NativeVirtioConsole *console=OSDynamicCast(NativeVirtioConsole,provider);
     return console && owner && console->isOpen(owner)?console->receive(bytes,size):kIOReturnNotOpen;
+}
+//: Put bytes on the console port from kernel code that runs after IOKit
+//: matching.  Unlike native_console_send() this needs no open client, because
+//: the driver's own records need none either -- they are sent from start() on
+//: the same path.  Returns kIOReturnNotOpen when there is no live console, so a
+//: caller that runs before start() or after cleanup() is told rather than
+//: silently dropping the record.
+extern "C" IOReturn native_console_report(const void *bytes,size_t size) {
+    return g_console?g_console->send(bytes,size):kIOReturnNotOpen;
 }
 
 IOService *NativeVirtioConsole::probe(IOService *provider,SInt32 *score) {
@@ -209,6 +237,10 @@ bool NativeVirtioConsole::start(IOService *provider) {
     if(read32(0)!=0x74726976 || read32(4)!=2 || read32(8)!=3)return false;
     ownsDevice=true;if(!configure())return false;
     native_console_mmio=mapping->getPhysicalAddress();native_console_ready=1;
+    // Publish the port to native_console_report() only now: configure() has
+    // allocated both queue buffers, published both rings and set online, so a
+    // caller that runs later is writing to a port that is really there.
+    g_console=this;
     // Announce the binding on the port itself.  This is the first point at
     // which the port is genuinely writable: configure() has allocated both
     // queue buffers, published both rings and set online, and gate is held
@@ -334,6 +366,11 @@ void NativeVirtioConsole::cleanup() {
     if(stopped) {
         for(unsigned i=0;i<2;i++) {OSSafeReleaseNULL(queues[i].ring);OSSafeReleaseNULL(queues[i].buffer);}
         OSSafeReleaseNULL(mapping);registers=0;ownsDevice=false;
+        // The port is gone, so nobody may report through it any more.  A
+        // dangling pointer here would let a later caller write to freed
+        // queue buffers, which is the class of bug that shows up as one
+        // spurious suite failure days later.
+        g_console=nullptr;
     }
     // If reset fails, preserve device-reachable allocations instead of freeing
     // storage while the device may still DMA. This path requires recovery.

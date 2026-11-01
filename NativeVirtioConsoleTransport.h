@@ -4,3 +4,8 @@
 #include <IOKit/IOService.h>
 extern "C" IOReturn native_console_send(IOService *,IOService *,const void *,size_t);
 extern "C" IOReturn native_console_receive(IOService *,IOService *,void *,size_t *);
+//: Report from kernel code that runs AFTER IOKit matching -- init's context,
+//: for instance, which is where this board's SystemCryptex mount happens.  It
+//: needs no open client, unlike native_console_send(), and returns
+//: kIOReturnNotOpen when no console is live rather than dropping the bytes.
+extern "C" IOReturn native_console_report(const void *,size_t);
