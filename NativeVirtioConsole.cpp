@@ -209,6 +209,17 @@ bool NativeVirtioConsole::start(IOService *provider) {
     if(read32(0)!=0x74726976 || read32(4)!=2 || read32(8)!=3)return false;
     ownsDevice=true;if(!configure())return false;
     native_console_mmio=mapping->getPhysicalAddress();native_console_ready=1;
+    // Announce the binding on the port itself.  This is the first point at
+    // which the port is genuinely writable: configure() has allocated both
+    // queue buffers, published both rings and set online, and gate is held
+    // by nobody.  probe() cannot do this -- gate, registers, the queue
+    // buffers and online are all still unset there, so send() would lock a
+    // null IOLock and panic rather than put a byte on the wire.  Nothing else
+    // writes here either: native_console_send() refuses while isOpen(owner)
+    // is false.  Without this line a driver that bound perfectly and one
+    // that never enumerated produce the same zero on the host.
+    static char const announcement[]="NativeVirtioConsole: bound virtio,mmio console port 0\n";
+    send(announcement,sizeof(announcement)-1);
     registerService();return true;
 }
 void NativeVirtioConsole::cleanup() {
