@@ -429,7 +429,40 @@ bool NativeVirtioConsole::start(IOService *provider) {
     static char const control_record[]=
         "{\"event\":\"diag.control_from_driver\",\"source\":"
         "\"NativeVirtioConsole.start\"}\n";
-    native_console_report(free_fn_record,sizeof(free_fn_record)-1);
+    // ROUND TWO OF THE EXPERIMENT.  Round one established the FACT and not the
+    // cause: on build 41390547018's matched kernel (sha256 73dbc959, all three
+    // literals byte-level in it, one occurrence each) the free function's record
+    // did NOT arrive while this very line's control record did -- and the mount
+    // patch's own native_console_report() records have never arrived in ANY
+    // capture either, across every boot taken.  Two translation units, multiple
+    // boots, every send()-based record landing.
+    //
+    // Three causes remain and they have different remedies:
+    //   status "not_open" -> g_console is null, so the ternary drops silently.
+    //                       Remedy: publish it earlier, or find what clears it.
+    //   status "success"  -> send() reports success and the record still does
+    //                       not arrive, so the loss is DOWNSTREAM of send() --
+    //                       in the descriptor or on the host's side -- and no
+    //                       amount of fixing the entry point will help.
+    //   status "other"    -> send() failed for a third reason, named by nothing
+    //                       yet; the value itself is worth a third round.
+    // A record that reports only absence cannot distinguish these, which is why
+    // round one could establish the fact and not the cause.
+    IOReturn free_fn_status = native_console_report(
+        free_fn_record, sizeof(free_fn_record) - 1);
+    static char const free_fn_ok[]=
+        "{\"event\":\"diag.free_fn_status\",\"status\":\"success\"}\n";
+    static char const free_fn_notopen[]=
+        "{\"event\":\"diag.free_fn_status\",\"status\":\"not_open\"}\n";
+    static char const free_fn_other[]=
+        "{\"event\":\"diag.free_fn_status\",\"status\":\"other\"}\n";
+    if (free_fn_status == kIOReturnSuccess) {
+        send(free_fn_ok,sizeof(free_fn_ok)-1);
+    } else if (free_fn_status == kIOReturnNotOpen) {
+        send(free_fn_notopen,sizeof(free_fn_notopen)-1);
+    } else {
+        send(free_fn_other,sizeof(free_fn_other)-1);
+    }
     send(control_record,sizeof(control_record)-1);
     registerService();return true;
 }
