@@ -44,6 +44,16 @@ class NativeVirtioConsole : public IOService {
     // repository has passed, because they read the function's shape and not the
     // class's access control.
     friend IOReturn native_console_report(const void *,size_t);
+    // native_console_poll() is the RX twin of native_console_report(): a free
+    // function that calls the same class's protected receive().  It needs the
+    // same grant for the same reason the line above does.  The failure mode is
+    // measured on the report entry point -- run 41313323081 failed archive 6/11
+    // with "'send' is a protected member of 'NativeVirtioConsole'" -- and
+    // receive() is protected exactly as send() is (declared at the same access
+    // level, five lines below it), so the same omission here fails the same way
+    // and passes every source-level guard this repository has, because they read
+    // the function's shape and not the class's access control.
+    friend IOReturn native_console_poll(void *,size_t *);
     IOMemoryMap *mapping=nullptr;
     IOLock *gate=nullptr;
     IOService *owner=nullptr;
@@ -125,6 +135,34 @@ extern "C" IOReturn native_console_receive(IOService *provider,IOService *owner,
 //: silently dropping the record.
 extern "C" IOReturn native_console_report(const void *bytes,size_t size) {
     return g_console?g_console->send(bytes,size):kIOReturnNotOpen;
+}
+//: Pull bytes the host wrote to the console port, from kernel code that runs
+//: after IOKit matching.  This is the RX twin of native_console_report() and it
+//: is shaped the same way on purpose: it needs no open client, because the
+//: driver's own receive() path needs none either -- it drains the queue 0
+//: buffer that configure() posted, and the port's records go out on the same
+//: path.  Returns kIOReturnNotOpen when there is no live console, so a caller
+//: that runs before start() or after cleanup() is told rather than having the
+//: bytes it was handed silently dropped.
+//:
+//: WHY THIS IS NOT native_console_receive().  That function is gated on
+//: console->isOpen(owner), and nothing on this board opens the port: the only
+//: opener anywhere in the pinned tree is NativeOfflineGPU.cpp:132, and that
+//: driver is not in the kernel four ways over (no CONFIG_XNU_NATIVE_OFFLINE_GPU
+//: in qemu_root_defconfig, no archive entry in board.toml,
+//: build-xnu-4k-baseline.sh:306 defaults it to 0, and zero byte-level
+//: occurrences of NativeOfflineGPU in the kernel the guest boots).  A
+//: kernel-side consumer cannot become the owner either, because
+//: IOService::open() dereferences forClient->reserved->uvars and a kernel
+//: thread is not an IOService.  So the owner-gated entry point is unreachable
+//: from kernel code by construction, and this is the one that is not.
+//:
+//: It is a byte transport and nothing more.  The header it is declared in says
+//: in its first two lines that it carries no message or GPU semantics, and
+//: that is the whole contract: whatever protocol the caller speaks lives in the
+//: caller, not here.
+extern "C" IOReturn native_console_poll(void *bytes,size_t *size) {
+    return g_console?g_console->receive(bytes,size):kIOReturnNotOpen;
 }
 
 IOService *NativeVirtioConsole::probe(IOService *provider,SInt32 *score) {
