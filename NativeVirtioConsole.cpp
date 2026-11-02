@@ -476,7 +476,26 @@ void NativeVirtioConsole::cleanup() {
         // dangling pointer here would let a later caller write to freed
         // queue buffers, which is the class of bug that shows up as one
         // spurious suite failure days later.
-        g_console=nullptr;
+        //
+        // ONLY THE INSTANCE THAT PUBLISHED THE PORT MAY UNPUBLISH IT.
+        //
+        // This guard is measured, not defensive.  reset() returns true for an
+        // instance that never started -- `if(!registers || !ownsDevice)return
+        // true` at :183 -- so EVERY instance's cleanup() clears g_console,
+        // including one that got as far as being constructed and then stopped.
+        // MEASURED on build 41400938438: diag.free_fn_status arrived as
+        // "not_open" while the control record on the next line arrived, from
+        // inside start(), with g_console=this at :289 and nothing between the
+        // two that assigns it.  g_console was therefore cleared by a DIFFERENT
+        // instance's teardown, and native_console_report() -- the entry point
+        // every kernel-side emitter in this project routes through -- has been
+        // dropping records silently for exactly that reason.
+        //
+        // The same defect is why the mount patch's native_console_report()
+        // records have never arrived in any capture, across every boot taken.
+        if (g_console == this) {
+            g_console = nullptr;
+        }
     }
     // If reset fails, preserve device-reachable allocations instead of freeing
     // storage while the device may still DMA. This path requires recovery.
