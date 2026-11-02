@@ -404,6 +404,33 @@ bool NativeVirtioConsole::start(IOService *provider) {
     }
     #undef NATIVE_CONSOLE_EMIT
     #undef NATIVE_CONSOLE_SRC
+    // ISOLATING EXPERIMENT, TEMPORARY.  Build 41369829766 measured that the
+    // load_init_program diagnostic -- an ungated native_console_report() call
+    // from kern_exec.c at t=71.8, on a guest that ran to t=1527.8 s with the
+    // record byte-level in the ESP kernel and the link resolved -- did NOT
+    // arrive, while the five records above, sent through this->send() directly,
+    // did.  Two variables changed at once there: the entry point (the free
+    // function rather than the member) and the caller's context (BSD kernel
+    // code rather than IOKit driver code).  And nothing in this repository had
+    // ever proven the free function delivers at all -- every record that ever
+    // satisfied a requirement went through send() from inside this class.
+    //
+    // So: the same free function, called from HERE, at the same point in the
+    // boot as the records that are known to work, plus a control sent the way
+    // the others are.  free_fn_from_driver absent and control_from_driver
+    // present -> the free function is broken, and every kernel-side emitter in
+    // this project is routed through a dead path.  Both present -> the free
+    // function works and the defect is specific to calling it from kern_exec.c,
+    // which points at g_console being null by then or at send()'s synchronous
+    // complete() wait behaving differently outside the driver's own context.
+    static char const free_fn_record[]=
+        "{\"event\":\"diag.free_fn_from_driver\",\"source\":"
+        "\"NativeVirtioConsole.start\"}\n";
+    static char const control_record[]=
+        "{\"event\":\"diag.control_from_driver\",\"source\":"
+        "\"NativeVirtioConsole.start\"}\n";
+    native_console_report(free_fn_record,sizeof(free_fn_record)-1);
+    send(control_record,sizeof(control_record)-1);
     registerService();return true;
 }
 void NativeVirtioConsole::cleanup() {
